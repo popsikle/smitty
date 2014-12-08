@@ -7,53 +7,47 @@ import (
 	"github.com/garyburd/redigo/redis"
 )
 
-type TwemproxyConfig struct {
-	Listen       string   `yaml:"listen,omitempty"`
-	Hash         string   `yaml:"hash,omitempty"`
-	Distribution string   `yaml:"distribution,omitempty"`
+type OutlandConfig struct {
 	Redis        bool     `yaml:"redis,omitempty"`
-	RetryTimeout int      `yaml:"server_retry_timeout,omitempty"`
-	FailureLimit int      `yaml:"server_failure_limit,omitempty"`
-	Servers      []string `yaml:"servers,omitempty"`
 }
 
-var twemproxyConfig map[string]TwemproxyConfig
+var outlandConfig map[string]OutlandConfig
 
 func UpdateMaster(master_name string, ip string, port string) bool {
-	address := ComposeRedisAddress(ip, port)
-	Debug(fmt.Sprintf("Updating master %s to %s.", master_name, address))
-	servers := twemproxyConfig[Settings.TwemproxyPoolName].Servers
-	for i := range servers {
-		server_data    := strings.Split(servers[i], string(' '))
-		address_data   := strings.Split(server_data[0], string(':'))
-		old_address    := ComposeRedisAddress(address_data[0], address_data[1])
-		server_name    := server_data[1]
+	Debug(fmt.Sprintf("Updating master %s to %s:%s.", master_name, ip, port))
+	ol_config := outlandConfig[master_name]
+	old_address    := ol_config['host']
+	old_port       := ol_config['port']
 
-		if master_name == server_name && address != old_address {
-			twemproxyConfig[Settings.TwemproxyPoolName].Servers[i] = fmt.Sprint(address, ":1 ", master_name)
-			return true
+	if port != old_port && ip != old_address {
+		outlandConfig[master_name]['host'] = ip
+		outlandConfig[master_name]['port'] = port
+		if master_name == 'main_write' {
+			outlandConfig['main_read']['host'] = ip
+			outlandConfig['main_read']['port'] = port
 		}
+		return true
 	}
 
 	return false
 }
 
-func LoadTwemproxyConfig() {
-	Debug("Loading Twemproxy config.")
-	ReadYaml(Settings.TwemproxyConfigFile, &twemproxyConfig)
+func LoadOutlandConfig() {
+	Debug("Loading Outland config.")
+	ReadYaml(Settings.AppConfig, &outlandConfig)
 }
 
-func SaveTwemproxyConfig() {
-	Debug("Saving Twemproxy config.")
-	WriteYaml(Settings.TwemproxyConfigFile, &twemproxyConfig)
+func SaveOutlandConfig() {
+	Debug("Saving Outland config.")
+	WriteYaml(Settings.AppConfig, &outlandConfig)
 }
 
-func RestartTwemproxy() error {
-	Debug("Restarting Twemproxy.")
+func RestartOutland() error {
+	Debug("Restarting Outland.")
 	out, err := exec.Command(Settings.RestartCommand).Output()
 
 	if err != nil {
-		Debug(fmt.Sprintf("Cannot restart twemproxy. output: %s. error: %s", out, err))
+		Debug(fmt.Sprintf("Cannot restart outland. output: %s. error: %s", out, err))
 	}
 
 	return err
@@ -67,7 +61,7 @@ func GetSentinel() (sentinel string) {
 func SwitchMaster(master_name string, ip string, port string) error {
 	Debug("Received switch-master.")
 	if UpdateMaster(master_name, ip, port) {
-		SaveTwemproxyConfig()
+		SaveOutlandConfig()
 		err := RestartTwemproxy()
 		return err
 	} else {
@@ -116,12 +110,18 @@ func SubscribeToSentinel() {
 	psc := redis.PubSubConn{c}
 	Debug("Subscribing to sentinel (+switch-master).")
 	psc.Subscribe("+switch-master")
+	psc.Subscribe("+slave-reconf-done")
 	for {
 		switch v := psc.Receive().(type) {
 		case redis.Message:
 			Debug(fmt.Sprintf("%s: message: %s", v.Channel, v.Data))
 			data := strings.Split(string(v.Data), string(' '))
-			SwitchMaster(data[0], data[3], data[4])
+			switch ch := v.Channel
+			case "+switch-master":
+				SwitchMaster(data[0], data[3], data[4])
+			case "+slave-reconf-done"
+				SwitchSlave(data[1], data[2], data[3])
+			}
 		case redis.Subscription:
 			Debug(fmt.Sprintf("%s: %s %d", v.Channel, v.Kind, v.Count))
 		case error:
@@ -131,6 +131,6 @@ func SubscribeToSentinel() {
 }
 
 func Run() {
-	LoadTwemproxyConfig()
+	LoadOutlandConfig()
 	SubscribeToSentinel()
 }

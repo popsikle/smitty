@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/areina/smitty/agent"
+	"github.com/popsikle/smitty/agent"
 )
 
 const (
